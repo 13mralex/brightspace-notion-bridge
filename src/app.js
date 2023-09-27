@@ -18,6 +18,10 @@ const tzShort = "EDT"
 const tzLong = "America/Indiana/Indianapolis"
 const locale = "en-US"
 
+//.env
+const dotenv = require("dotenv")
+dotenv.config()
+
 //Semesters
 const today = new Date()
 const year = today.getFullYear()
@@ -33,7 +37,6 @@ const fallSemester = {
     start: new Date('Aug 01 '+ year),
     end: new Date('Dec 31 '+ year)
 }
-
 
 //Appwrite query to max limit from 25 to 100
 const awQuery = [appwrite.Query.limit(100)]
@@ -93,7 +96,7 @@ async function pageflow(user) {
 
     const parentPage = await generateParentPage(user)
 
-    //const coursesPage = await generateCoursesPages(user,parentPage)
+    const coursesPage = await generateCoursesPages(user,parentPage)
 
     const activitiesPage = await generateActivitiesPages(user,parentPage)
 
@@ -496,6 +499,10 @@ async function generateActivitiesPages(user,parentPage) {
                             {
                                 name: "Lab",
                                 color: "blue"
+                            },
+                            {
+                                name: "Task",
+                                color: "yellow"
                             }
                         ]
                     }
@@ -517,6 +524,10 @@ async function generateActivitiesPages(user,parentPage) {
                             },
                             {
                                 name: "Submitted",
+                                color: "green"
+                            },
+                            {
+                                name: "Completed",
                                 color: "green"
                             },
                             {
@@ -554,7 +565,7 @@ async function generateActivitiesPages(user,parentPage) {
     //Get Activites
     const query =
     `
-    query GetActivities {
+    query GetActivitiesEvents {
         activities(start: "${getSemester().start}", end: "${getSemester().end}") {
           dueDate
           endDate
@@ -583,21 +594,45 @@ async function generateActivitiesPages(user,parentPage) {
             name
           }
         }
+        events(start: "${getSemester().start}", end: "${getSemester().end}") {
+          id
+          name
+          organization {
+            id
+            name
+          }
+          description
+          startDate
+          endDate
+          url
+        }
       }
     `
 
-    var activities = await brightspaceQuery(query,user.token)
-    activities = activities.activities
+    var activitiesEvents = await brightspaceQuery(query,user.token)
+    activities = activitiesEvents.activities
+    events = activitiesEvents.events
 
     //console.log('Activities:',activities)
 
-    //Start page generation
-    for (const activity of activities.filter(x => x.source != null)) {
+    async function pageGeneration(item,event=false) {
 
-        var page = await generateActivityPage(activity,activitiesPage)
+        var page
+        var name
+        var itemType
+        
+        if (event) {
+            page = await generateEventPage(item,activitiesPage)
+            name = item.name
+            itemType = "event"
+        } else {
+            page = await generateActivityPage(item,activitiesPage)
+            name = item.source.name
+            itemType = "activity"
+        }
 
         //Update page if exists, create otherwise
-        const existingPage = user.idMap.filter(x => x.brightspaceId == activity.id)[0]
+        const existingPage = user.idMap.filter(x => x.brightspaceId == item.id)[0]
         if (existingPage) {
 
 
@@ -606,11 +641,11 @@ async function generateActivitiesPages(user,parentPage) {
 
             const existingPageData = JSON.parse(existingPage.rawData)
 
-            const diff = deepDiff.diff(existingPageData,activity)
+            const diff = deepDiff.diff(existingPageData,item)
 
             //Check for differences, update if so
             if (diff) {
-                console.log('Activity updated:',activity.source.name)
+                console.log(`${itemType} updated: ${name}`)
 
                 console.log('DeepDiff:',diff)
 
@@ -621,14 +656,14 @@ async function generateActivitiesPages(user,parentPage) {
                 const pageObject = await notion.pages.update(page)
 
                 updates.push({
-                    activity: activity.source.name,
+                    activity: name,
                     type: "update",
                     diff: diff
                 })
 
                 //Update DB
                 const data = {
-                    rawData: JSON.stringify(activity)
+                    rawData: JSON.stringify(item)
                 }
                 appwriteDb.updateDocument('notionIds',user.userId,existingPage['$id'],data)
 
@@ -640,28 +675,37 @@ async function generateActivitiesPages(user,parentPage) {
             
         } else {
             //console.log("Activity page doesn't exist")
-            console.log('Activity created:',activity.source.name)
+            console.log(`${itemType} created: ${name}`)
 
             //console.log('Page:',page)
 
             const pageObject = await notion.pages.create(page)
 
             updates.push({
-                activity: activity.source.name,
+                activity: name,
                 type: "create"
             })
 
             const docData = {
-                name: activity.source.name,
+                name: name,
                 notionPageId: pageObject.id,
-                brightspaceId: activity.id,
-                type: "activity",
-                rawData: JSON.stringify(activity)
+                brightspaceId: item.id,
+                type: itemType,
+                rawData: JSON.stringify(item)
             }
 
             appwriteDb.createDocument('notionIds',user.userId,appwrite.ID.unique(),docData)
         }
+    }
 
+    //Start page generation
+    //activities
+    for (const activity of activities.filter(x => x.source != null)) {
+        pageGeneration(activity,false)
+    }
+    //events
+    for (const event of events.filter(x => x.name != null)) {
+        pageGeneration(event,true)
     }
 
 }
@@ -777,17 +821,133 @@ async function generateActivityPage(activity,parentPage) {
         }
     }
 
-    if (activity.endDate) {
+    if (activity.endDate && !activity.dueDate) {
         page.properties["Due"] = {
             date: {
                 start: getDate(activity.endDate),
                 time_zone: tzLong
             }
         }
-    } else if (activity.dueDate) {
+    } else if (activity.dueDate && !activity.endDate) {
         page.properties["Due"] = {
             date: {
                 start: getDate(activity.dueDate),
+                time_zone: tzLong
+            }
+        }
+    } else if (activity.dueDate && activity.endDate) {
+        page.properties["Due"] = {
+            date: {
+                start: getDate(activity.dueDate),
+                time_zone: tzLong
+            }
+        }
+    }
+
+    return page
+
+}
+
+async function generateEventPage(event,parentPage) {
+
+    var eventType;
+    var dueDate;
+    var activityStatus;
+    var activityDescription;
+
+    //Determine activity type
+    eventType = "Task"
+
+    //Determine if submitted
+    eventStatus = "Not Started"
+
+    //Determine description
+    if (event.description) {
+        eventDescription = event.description
+    } else {
+        eventDescription = 'No description'
+    }
+
+    const charlimit = 1990
+    //Clip if over 2000 chars
+    if (eventDescription.length > charlimit) {
+        eventDescription = eventDescription.substring(0,charlimit) + '[clipped]'
+    }
+
+    var page = {
+        "parent": {
+            type: "database_id",
+            database_id: parentPage.id
+        },
+        title: [{
+            type: "text",
+            text: {
+                content: event.name
+            }
+        }],
+        properties: {
+            Name: {
+                title: [{
+                    text: {
+                        content: event.name
+                    }
+                }]
+            },
+            "Course": {
+                select: {
+                    name: event.organization.name
+                }
+            },
+            "Type": {
+                select: {
+                    name: eventType
+                }
+            },
+            "Status": {
+                select: {
+                    name: eventStatus
+                }
+            },
+            "Assignment Link": {
+                url: event.url
+            }
+        },
+        children: [
+            {
+                object: "block",
+                callout: {
+                    rich_text: [
+                        {
+                            type: "text",
+                            text: {
+                                content: eventDescription
+                            }
+                        }
+                    ],
+                    icon: {
+                        emoji: '💡'
+                    },
+                    color: "default"
+                }
+            }
+        ]
+    }
+
+
+
+    if (event.startDate) {
+        page.properties["Available"] = {
+            date: {
+                start: getDate(event.startDate),
+                time_zone: tzLong
+            }
+        }
+    }
+
+    if (event.endDate) {
+        page.properties["Due"] = {
+            date: {
+                start: getDate(event.endDate),
                 time_zone: tzLong
             }
         }
@@ -1136,11 +1296,15 @@ function getSemester() {
 
 async function resetActivities(user) {
 
+    let startDate = Date.parse('01 Aug 2023 11:00:00 EDT')
+    let endDate = Date.parse('04 Sep 2023 11:59:00 EDT')
+
     //var activities = await appwriteDb.listDocuments('notionIds',user.userId,awQuery)
     var activities = await getDocuments('notionIds',user.userId)
     activities = activities.filter(x => x.type == 'activity')
+    activities = activities.filter(x => startDate <= Date.parse(x['$createdAt']) && endDate >= Date.parse(x['$createdAt']))
 
-    //console.log('Activities:',activities)
+    console.log('Activities:',activities)
 
     for (const activity of activities) {
         console.log('Deleting entry for',activity.name)
@@ -1151,9 +1315,13 @@ async function resetActivities(user) {
 
 async function resetUpdates(user) {
 
+    let startDate = Date.parse('01 Aug 2023 11:00:00 EDT')
+    let endDate = Date.parse('04 Sep 2023 11:59:00 EDT')
+
     //var updates = await appwriteDb.listDocuments('notionIds',user.userId,awQuery)
     var updates = await getDocuments('notionIds',user.userId)
     updates = updates.filter(x => x.type == 'update')
+    updates = updates.filter(x => startDate <= Date.parse(x['$createdAt']) && endDate >= Date.parse(x['$createdAt']))
 
     //console.log('Activities:',activities)
 
@@ -1206,7 +1374,7 @@ async function getDocuments(db,collection) {
 
 }
 
-//main()
+main()
 
 async function test(user) {
     const docs = await getDocuments('notionIds',user.userId)
